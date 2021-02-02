@@ -16,25 +16,12 @@
       line: "alias vi='vim'"
       state: present
 
-  - name: Create vim configuration file
-    file:
-      path: /root/.vimrc
-      state: touch
-      owner: root
-      group: root
-      mode: 0644
-
-  - name: Configure vim
-    blockinfile:
-      path: /root/.vimrc
-      block: |
-        set nocompatible
-        set number
-        set autoindent
-        syntax on
-        highlight Comment ctermfg=LightCyan
-      marker: ""
+  - name: configure krew in bashrc
+    lineinfile:
+      path: /root/.bashrc
+      line: "export PATH='${KREW_ROOT:-$HOME/.krew}/bin:$PATH'"
       state: present
+
 
   - name: Enable root SSH login
     lineinfile:
@@ -42,6 +29,52 @@
       regexp: "^PermitRootLogin"
       line: "PermitRootLogin yes"
       state: present
+
+  - name: prep installing krew
+    copy:
+      dest: "/opt/instkrew.sh"
+      content: |
+        (
+        set -x; cd "$(mktemp -d)" &&
+        curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/krew.tar.gz" &&
+        tar zxvf krew.tar.gz &&
+        KREW=./krew-"$(uname | tr '[:upper:]' '[:lower:]')_$(uname -m | sed -e 's/x86_64/amd64/' -e 's/arm.*$/arm/')" &&
+        "$KREW" install krew
+        )
+
+  - name: modules for containerd
+    copy:
+      dest: "/etc/modules-load.d/containerd.conf"
+      content: |
+        overlay
+        br_netfilter
+  
+  - name: Add the overlay module
+    community.general.modprobe:
+      name: overlay
+      state: present
+  - name: Add the br_netfilter module
+    community.general.modprobe:
+      name: br_netfilter
+      state: present
+
+  - ansible.posix.sysctl:
+      name: net.bridge.bridge-nf-call-iptables
+      value: '1'
+      state: absent
+      sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+  - ansible.posix.sysctl:
+      name: net.ipv4.ip_forward
+      value: '1'
+      state: absent
+      sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+  - ansible.posix.sysctl:
+      name: net.ipv4.ip_forward
+      value: '1'
+      state: absent
+      sysctl_file: /etc/sysctl.d/99-kubernetes-cri.conf
+      reload: yes
+
 
   - name: Disable quiet boot mode
     lineinfile:
@@ -52,6 +85,27 @@
 
   - name: Update grub2
     command: update-grub2
+
+
+  - name: Add an the signing key for Docker
+    ansible.builtin.apt_key:
+      url: https://download.docker.com/linux/debian/gpg
+      state: present
+
+  - name: Add Docker repository into sources list
+    ansible.builtin.apt_repository:
+      repo: deb [arch=amd64] https://download.docker.com/linux/debian buster stable
+      state: present
+
+  - name: Add an the signing key for Kubernetes
+    ansible.builtin.apt_key:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      state: present
+
+  - name: Add Kubernetes repository into sources list
+    ansible.builtin.apt_repository:
+      repo: deb https://apt.kubernetes.io/ kubernetes-xenial main
+      state: present
 
   - name: Upgrade all packages
     apt:
@@ -68,51 +122,22 @@
       - ccze
       - curl
       - git
+      - zsh
+      - tmux
+      - gnupg2
+      - apt-transport-https
       - net-tools
+      - containerd.io
       - rsync
       - screen
       - tcpdump
       - vim
+      - kubectl
+      - kubelet
+      - kubeadm
       - wget
-
-  - name: Install dependencies for VirtualBox Guest Additions
-    apt:
-      name: "{{ packages }}"
-      state: latest
-    vars:
-      packages:
-      - dkms
-      - make
-      - "linux-headers-{{ ansible_kernel }}"
-    when:
-      - ansible_virtualization_type == "virtualbox"
-
-  - name: Mount VBoxGuestAdditions.iso
-    mount:
-      path: /mnt
-      src: /home/packer/VBoxGuestAdditions.iso
-      fstype: iso9660
-      opts: ro,loop
-      state: mounted
-    when: ansible_virtualization_type == "virtualbox"
-
-  - name: Install VBoxGuestAdditions.iso
-    command: sh /mnt/VBoxLinuxAdditions.run
-    register: vbox_result
-    failed_when: "'Running kernel modules will not be replaced until \nthe system is restarted' not in vbox_result.stdout"
-    when: ansible_virtualization_type == "virtualbox"
-
-  - name: Umount VBoxGuestAdditions.iso
-    mount:
-      path: /mnt
-      state: absent
-    when: ansible_virtualization_type == "virtualbox"
-
-  - name: Delete VBoxGuestAdditions.iso
-    file:
-      path: /home/packer/VBoxGuestAdditions.iso
-      state: absent
-    when: ansible_virtualization_type == "virtualbox"
+      - ca-certificates
+      - software-properties-common
 
   - name: Install open-vm-tools
     apt:
@@ -120,3 +145,22 @@
       state: latest
     when:
       - ansible_virtualization_type == "VMware"
+
+  - name: Create a directory if it does not exist
+    ansible.builtin.file:
+      path: /etc/containerd
+      state: directory
+  - name: configure containerd
+    command: containerd config default | sudo tee /etc/containerd/config.toml
+
+ 
+
+  - name: Prevent python from being upgraded
+    dpkg_selections:
+      name: "{{ hold_packages }}"
+      selection: hold
+    vars:
+      packages: 
+      - kubelet
+      - kubeadm
+      - kubectl
